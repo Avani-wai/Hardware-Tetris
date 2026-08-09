@@ -1,0 +1,106 @@
+System Overview
+The project is divided into two phases: software simulation (using Verilator and SDL) and physical hardware deployment (FPGA). The entire system operates on a single 25.175 MHz master clock.
+
+Module 1: Clock Generation Unit
+This unit distributes the 25.175 MHz master clock to all system components. For modules requiring a 60 Hz update rate (like game logic), this unit generates a single-cycle enable pulse using a mod-n counter. The counter increments every clock cycle and resets at n-1, outputting a pulse. The value of n is calculated as (25,175,000 / 60) to achieve exactly 60 Hz.
+
+Module 2: Input Processing Pipeline
+This module conditions raw, asynchronous physical button presses into safe, synchronous 1-cycle pulses for the system.
+Synchronizer: The raw input passes through two flip-flops in series to resolve metastability and align the signal with the master clock.
+Debouncer: A mod-m counter ensures the signal is held high continuously for at least 20 ms. If the input drops to 0 at any point, the counter immediately resets to 0.
+Edge Detector: Converts the sustained high signal from the debouncer into a single-cycle pulse so that one physical button press registers exactly once in the game logic.
+
+Module 3: Random Piece Generator
+This module generates pseudo-random pieces using a 3-bit Linear Feedback Shift Register (LFSR). It is initialized with a non-zero seed (e.g 001). Because a 3-bit LFSR cycles through exactly 7 non-zero states, it maps perfectly to the 7 Tetris piece types. It runs continuously on the 25.175 MHz clock. Since human input timing is unpredictable, the LFSR state at the exact moment a piece is requested provides reliable randomness.
+
+Module 4: Piece Buffer Management
+This module manages the piece pipeline. It contains 3-bit registers for the Active (falling) piece, the Next piece, and the Hold piece. It also maintains a 'hold empty' flag and a 'hold lock' flag. An internal FSM takes care these buffers, executing piece swaps when requested and enforcing the rule that a player can only swap with the hold buffer once per piece drop.
+
+Module 5: Playfield Memory 
+This module stores the locked blocks on the board. It consists of a 10x20 grid of flip-flops (200 bits total), representing whether a specific block in the playfield is occupied or empty. It allows the game state logic to perform parallel collision checks and provides the VGA controller with the data needed to render locked blocks.
+
+Module 6: Game State and Control Logic
+This module tracks the live geometry of the active falling piece (coordinates and rotation state). It takes inputs from the Input Module (user commands), the Playfield Memory (for obstacle detection), and the 60 Hz enable pulse (for gravity). It is responsible for calculating tentative moves, checking for collisions, updating the piece's coordinates, and locking the piece into memory when it hits the floor. It outputs the active piece coordinates to the VGA controller and sends a spawn pulse to the Piece Buffer when a new piece is needed.
+
+Module 7: VGA Controller
+This module handles the display output. It runs continuously on the 25.175 MHz clock to maintain internal horizontal and vertical pixel counters, which are used to generate the necessary HSYNC and VSYNC signals for the monitor. It translates the current pixel counters into Tetris grid coordinates (row and column). It then reads the Playfield Memory and checks the active piece coordinates from the Game State module. If a locked block or the active piece exists at the current coordinate, it outputs the white to the screen, otherwise, it outputs black.
+
+Inputs and Outputs: 
+Module 1:
+Inputs: 
+rst (1 bit) - Synchronous Reset signal
+clk (1 bit) - The 25.175Mhz master clock
+Outputs:
+tick_60Hz (1 bit) - The 60Hz enable pulse
+
+Module 2:
+Inputs:
+rst (1 bit) - Synchronous Reset signal
+clk (1 bit)  - The 25.175Mhz master clock
+btn_press_raw (5 bits) - Raw button presses for left, right, drop, rotate, swap
+Outputs:
+btn_press_proc (5 bits) - Processed button presses which sychronize with clock
+
+Module 3:
+Inputs:
+rst (1 bit) - Synchronous Reset signal (seeds the LFSR to a non-zero value)
+clk (1 bit) - The 25.175Mhz master clock
+Outputs:
+rand_piece (3 bits) - The continuously shifting pseudo-random piece ID (1 to 7)
+
+Module 4:
+Inputs:
+rst (1 bit) - Synchronous Reset signal
+clk (1 bit) - The 25.175Mhz master clock
+rand_piece (3 bits) - Sourced from the LFSR module, the piece to be held in next_piece register in case the next piece becomes active piece
+spawn_pulse (1 bit) - Sourced from Game State; triggers Next piece to become Active
+btn_press_proc_swap (1 bit) - Sourced from Input Module (the swap button pulse), exchanges the held piece and active piece
+Outputs:
+active_piece (3 bits) - ID of the currently falling piece
+next_piece (3 bits) - ID of the piece in the Next box
+hold_piece (3 bits) - ID of the piece currently in the hold buffer
+
+Module 5:
+Inputs:
+rst (1 bit) - Synchronous Reset signal (clears the 200-bit board to all 0s)
+clk (1 bit) - The 25.175Mhz master clock
+write_en (1 bit) - Sourced from Game State; enables writing to memory
+write_addr (8 bits) - Sourced from Game State; the 0-199 index to write a locked block
+write_data (1 bit) - Sourced from Game State; 1 for filled block, 0 for empty
+read_addr (8 bits) - Sourced from VGA Controller; the 0-199 index requested for screen drawing
+Outputs:
+read_data (1 bit) - State of the block at read_addr (sent to VGA)
+grid_state (200 bits) - The full memory array output (sent to Game State for parallel collision detection)
+
+Module 6:
+Inputs:
+rst (1 bit) - Synchronous Reset signal
+clk (1 bit) - The 25.175Mhz master clock
+tick_60Hz (1 bit) - Sourced from Clock Generation Unit (triggers gravity fall)
+btn_press_proc (4 bits) - Sourced from Input Module (Left, Right, Rotate, Drop)
+active_piece (3 bits) - Sourced from Piece Buffer (determines collision boundaries/geometry)
+grid_state (200 bits) - Sourced from Playfield Memory (evaluates tentative moves against locked blocks)
+Outputs:
+active_X (4 bits) - Current X coordinate of the falling piece (0-9)
+active_Y (5 bits) - Current Y coordinate of the falling piece (0-19)
+rotation_state (2 bits) - Current rotation state (0-3)
+spawn_pulse (1 bit) - Sent to Piece Buffer when a piece locks and a new one is needed
+write_en (1 bit) - Sent to Playfield Memory during the LOCK state
+write_addr (8 bits) - Sent to Playfield Memory during the LOCK state
+write_data (1 bit) - Sent to Playfield Memory during the LOCK state
+
+Module 7:
+Inputs:
+rst (1 bit) - Synchronous Reset signal
+clk (1 bit) - The 25.175Mhz master clock
+active_X (4 bits) - Sourced from Game State
+active_Y (5 bits) - Sourced from Game State
+rotation_state (2 bits) - Sourced from Game State
+active_piece (3 bits) - Sourced from Piece Buffer
+read_data (1 bit) - Sourced from Playfield Memory (indicates if a locked block exists at the draw coordinate)
+Outputs:
+read_addr (8 bits) - Sent to Playfield Memory (requests grid data based on internal pixel counters)
+vga_hsync (1 bit) - Horizontal sync pulse to the physical monitor / SDL window
+vga_vsync (1 bit) - Vertical sync pulse to the physical monitor / SDL window
+vga_out (1 bits) - The final data to the physical monitor / SDL window (1-bit for white and black)
+
